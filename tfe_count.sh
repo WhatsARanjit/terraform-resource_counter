@@ -63,7 +63,7 @@ for row in $(echo "${workspace_list}" | jq -r '.[] | @base64'); do
     current_state=$(curl -sk --header "Authorization: Bearer $TFE_TOKEN" --header "Content-Type: application/vnd.api+json" $state_url)
 
     # Filter for target resource type
-    targets=$(echo $current_state | jq --arg TFE_TYPE "$TFE_TYPE" '.modules | map(.resources)[0] | to_entries[] | select(.value.type == $TFE_TYPE) | { "id": .key } | add')
+    targets=$(echo $current_state | jq --arg TFE_TYPE "$TFE_TYPE" '.modules[].resources | to_entries[] | select (.value.type == $TFE_TYPE) | .key')
 
     # Handle empty variable and count
     if [[ -z "$targets" ]]; then
