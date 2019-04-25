@@ -22,22 +22,46 @@ if [[ -z "$1" ]]; then
 fi
 TFE_TYPE=$1
 
-# tfe_api(method, endpoint, data)
-tfe_api() {
-  ret=$(curl -sk \
+# http_call(method, url, {data}, expected_error_codes)
+RESPONSE=$(mktemp -t tfe_count)
+http_call() {
+  status=$(curl -sk \
     --header "Authorization: Bearer $TFE_TOKEN" \
     --header "Content-Type: application/vnd.api+json" \
     --data "$3" \
     --request $1 \
-    "https://${TFE_SERVER}/api/${TFE_API_VERSION}/$2")
-  echo $ret
+    -w %{http_code} \
+    -o $RESPONSE \
+    "$2")
+  # Set acceptable exit codes
+  if [[ -z "$4" ]]; then
+    error_codes=(200 204)
+  else
+    # Expand to bash array
+    error_codes=($(echo $4 | tr ',' ' '))
+  fi
+  # Check if status code is acceptable
+  if [[ " ${error_codes[*]} " == *" ${status} "* ]]; then
+    cat $RESPONSE
+  else
+    echo "ERROR: Response code: ${status}. $(cat $RESPONSE)" 1>&2
+    return 1
+  fi
+}
+
+# tfe_api(method, endpoint, {data}, expected_error_codes)
+tfe_api() {
+  ret=$(http_call $1 "https://${TFE_SERVER}/api/${TFE_API_VERSION}/$2" "$3" $4)
+  [ $? -ne 1 ] && echo $ret || return 1 # Stop if cURL fail
 }
 
 # Grab timestamp
 NOW=$(date)
 
 # Space-separated list of workspace IDs and names
-workspace_list=$(tfe_api GET organizations/$TFE_ORG/workspaces | jq -r '[.data[] | { "id": .id, "name": .attributes.name }]')
+get_workspace_list=$(tfe_api GET organizations/$TFE_ORG/workspaces)
+[ $? -ne 1 ] || exit $?
+workspace_list=$(echo $get_workspace_list | jq -r '[.data[] | { "id": .id, "name": .attributes.name }]')
 
 TOTAL=0
 
@@ -52,7 +76,10 @@ for row in $(echo "${workspace_list}" | jq -r '.[] | @base64'); do
   json="${json} \"name\": \"${ws_name}\""
 
   # Find state URL
-  state_url=$(tfe_api GET workspaces/$ws_id/current-state-version | jq -r '.data.attributes."hosted-state-download-url"')
+  # Need 404 status code in case workspace has no state yet`
+  get_state_url=$(tfe_api GET workspaces/$ws_id/current-state-version {} '200,204,404')
+  [ $? -ne 1 ] || exit $?
+  state_url=$(echo $get_state_url | jq -r '.data.attributes."hosted-state-download-url"')
   json="${json}, \"state_url\": \"${state_url}\""
 
   # Check for state file
@@ -60,7 +87,7 @@ for row in $(echo "${workspace_list}" | jq -r '.[] | @base64'); do
     count=0
   else
     # Grab state from URL
-    current_state=$(curl -sk --header "Authorization: Bearer $TFE_TOKEN" --header "Content-Type: application/vnd.api+json" $state_url)
+    current_state=$(http_call GET $state_url)
 
     # Filter for target resource type
     targets=$(echo $current_state | jq --arg TFE_TYPE "$TFE_TYPE" '.modules[].resources | to_entries[] | select (.value.type == $TFE_TYPE) | .key')
